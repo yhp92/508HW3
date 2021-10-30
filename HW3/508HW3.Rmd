@@ -1,0 +1,222 @@
+---
+title: "MUSA 508 HW3"
+author: "Hanpu Yao"
+date: "2021/10/29"
+output: html_document
+---
+
+1. Introduction
+
+Predictive policing is an analytical way to forecast potential criminal activities based on realated factors, such as location and time. However, this tool is controversial even if it isuseful. Since public safety resources like policing are limited, it is wise to allocate these resources to where crimes most likely to happen. No to mention the complicatedness
+
+
+
+0. Set up 
+Load package and source
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+
+library(tidyverse)
+library(sf)
+library(RSocrata)
+library(viridis)
+library(spatstat)
+library(raster)
+library(spdep)
+library(FNN)
+library(grid)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(tidycensus)
+# functions
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
+
+```
+
+Import data
+```{r}
+policeDistricts <- 
+  st_read("https://data.cityofchicago.org/api/geospatial/fthy-xz3r?method=export&format=GeoJSON") %>%
+  st_transform('ESRI:102271') %>%
+  dplyr::select(District = dist_num)
+  
+policeBeats <- 
+  st_read("https://data.cityofchicago.org/api/geospatial/aerh-rz74?method=export&format=GeoJSON") %>%
+  st_transform('ESRI:102271') %>%
+  dplyr::select(District = beat_num)
+
+bothPoliceUnits <- rbind(mutate(policeDistricts, Legend = "Police Districts"), 
+                         mutate(policeBeats, Legend = "Police Beats"))
+
+```
+
+
+```{r}
+
+autotheft <- 
+  read.socrata("https://data.cityofchicago.org/Public-Safety/Crimes-2017/d62x-nvdr") %>% 
+    filter(Primary.Type == "MOTOR VEHICLE THEFT" & Description == "AUTOMOBILE") %>%
+    mutate(x = gsub("[()]", "", Location)) %>%  # [ab] means a or b 
+    separate(x,into= c("Y","X"), sep=",") %>%
+    mutate(X = as.numeric(X),Y = as.numeric(Y)) %>% 
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant")%>%
+    st_transform('ESRI:102271') %>% 
+    distinct()
+
+chicagoBoundary <- 
+  st_read(file.path(root.dir,"/Chapter5/chicagoBoundary.geojson")) %>%
+  st_transform('ESRI:102271') 
+```
+
+```{r fig.width=6, fig.height=4}
+# uses grid.arrange to organize indpendent plots
+grid.arrange(ncol=2,
+ggplot() + 
+  geom_sf(data = chicagoBoundary) +
+  geom_sf(data = autotheft, colour="red", size=0.1, show.legend = "point") +
+  labs(title= "Auto vehicle thefts, Chicago - 2017") +
+  mapTheme(title_size = 14),
+
+ggplot() + 
+  geom_sf(data = chicagoBoundary, fill = "grey40") +
+  stat_density2d(data = data.frame(st_coordinates(autotheft)), 
+                 aes(X, Y, fill = ..level.., alpha = ..level..),
+                 size = 0.01, bins = 40, geom = 'polygon') +
+  scale_fill_viridis() +
+  scale_alpha(range = c(0.00, 0.35), guide = FALSE) +
+  labs(title = "Density of Moto vehicle thefts") +
+  mapTheme(title_size = 14) + theme(legend.position = "none"))
+```
+
+Create fishnet.
+```{r}
+fishnet <- 
+  st_make_grid(chicagoBoundary,
+               cellsize = 500, 
+               square = T) %>%
+  .[chicagoBoundary] %>%            # <- MDH Added
+  st_sf() %>%
+  mutate(uniqueID = rownames(.))
+```
+
+Aggregate points to fishnet
+```{r}
+## add a value of 1 to each crime, sum them with aggregate
+crime_net <- 
+  dplyr::select(autotheft) %>% 
+  mutate(countBurglaries = 1) %>% 
+  aggregate(., fishnet, sum) %>%
+  mutate(countBurglaries = replace_na(countBurglaries, 0),
+         uniqueID = rownames(.),
+         cvID = sample(round(nrow(fishnet) / 24), 
+                       size=nrow(fishnet), replace = TRUE))
+
+ggplot() +
+  geom_sf(data = crime_net, aes(fill = countBurglaries), color = NA) +
+  scale_fill_viridis() +
+  labs(title = "Count of Moto vehicle thefts for the fishnet") +
+  mapTheme()
+```
+
+
+```{r}
+abandonCars <- 
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Abandoned-Vehicles-No-Duplica/atid-bgws") %>%
+    mutate(year = substr(creation_date,1,4)) %>% filter(year == "2017") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Abandoned_Cars")
+  
+abandonBuildings <- 
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Vacant-and-Abandoned-Building/7nii-7srd") %>%
+    mutate(year = substr(date_service_request_was_received,1,4)) %>%  filter(year == "2017") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Abandoned_Buildings")
+
+graffiti <- 
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Graffiti-Removal-No-Duplicate/8tus-apua") %>%
+    mutate(year = substr(creation_date,1,4)) %>% filter(year == "2017") %>%
+    filter(where_is_the_graffiti_located_ %in% c("Front", "Rear", "Side")) %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Graffiti")
+
+streetLightsOut <- 
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Street-Lights-All-Out-No-Dupl/756k-itxx") %>%
+    mutate(year = substr(creation_date,1,4)) %>% filter(year == "2017") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Street_Lights_Out")
+
+sanitation <-
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Sanitation-Code-Complaints-No/rccf-5427") %>%
+    mutate(year = substr(creation_date,1,4)) %>% filter(year == "2017") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Sanitation")
+
+liquorRetail <- 
+  read.socrata("https://data.cityofchicago.org/resource/nrmj-3kcf.json") %>%  
+    filter(business_activity == "Retail Sales of Packaged Liquor") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Liquor_Retail")
+
+neighborhoods <- 
+  st_read("https://raw.githubusercontent.com/blackmad/neighborhoods/master/chicago.geojson") %>%
+  st_transform(st_crs(fishnet)) 
+```
+
+```{r}
+garbagecarts1 <- 
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Garbage-Carts-No-Duplicates/cry7-g5xt") %>%
+    mutate(year = substr(creation_date,1,4)) %>%  filter(year == "2017") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Garbage_Carts")
+
+policestation <- 
+  read.socrata("https://data.cityofchicago.org/Public-Safety/Police-Stations/z8bn-74gv") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "police_station")
+```
+
+```{r}
+trafficCrash <- 
+  trafficCrash %>%
+    mutate(Legend = "Traffic_crash")
+```
+
+```{r}
+
+garbagecarts <- 
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Garbage-Carts-Historical/9ksk-na4q") %>%
+    mutate(year = substr(creation_date,1,4)) %>%  filter(year == "2017") %>%
+    dplyr::select(Y = latitude, X = longitude) %>%
+    na.omit() %>%
+    st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
+    st_transform(st_crs(fishnet)) %>%
+    mutate(Legend = "Garbage_Carts")
+```
+
