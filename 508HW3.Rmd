@@ -18,8 +18,7 @@ Broken Windows Theory states that visible signs of civil disorder, such as vanda
 0. Set up 
 Load package and source
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
-
+knitr::opts_chunk$set(warning = FALSE, echo = TRUE)
 library(tidyverse)
 library(sf)
 library(RSocrata)
@@ -109,17 +108,18 @@ fishnet <-
 Aggregate points to fishnet
 ```{r}
 ## add a value of 1 to each crime, sum them with aggregate
-crime_net <- 
+crime_net =
   dplyr::select(autotheft) %>% 
-  mutate(countBurglaries = 1) %>% 
+  mutate(count = 1) %>% 
   aggregate(., fishnet, sum) %>%
-  mutate(countBurglaries = replace_na(countBurglaries, 0),
+  mutate(count = replace_na(count, 0),
          uniqueID = rownames(.),
-         cvID = sample(round(nrow(fishnet) / 24), 
+         cvID = sample(round(nrow(fishnet) / 57), # to make 100 groups
                        size=nrow(fishnet), replace = TRUE))
 
+
 ggplot() +
-  geom_sf(data = crime_net, aes(fill = countBurglaries), color = NA) +
+  geom_sf(data = crime_net, aes(fill = count), color = NA) +
   scale_fill_viridis() +
   labs(title = "Count of Moto vehicle thefts for the fishnet") +
   mapTheme()
@@ -128,7 +128,7 @@ ggplot() +
 
 ```{r}
 abandonCars <- 
-  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Abandoned-Vehicles-No-Duplica/atid-bgws") %>%
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Abandoned-Vehicles/3c9v-pnva") %>%
     mutate(year = substr(creation_date,1,4)) %>% filter(year == "2017") %>%
     dplyr::select(Y = latitude, X = longitude) %>%
     na.omit() %>%
@@ -146,7 +146,7 @@ abandonBuildings <-
     mutate(Legend = "Abandoned_Buildings")
 
 graffiti <- 
-  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Graffiti-Removal-No-Duplicate/8tus-apua") %>%
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Graffiti-Removal-Historical/hec5-y4x5") %>%
     mutate(year = substr(creation_date,1,4)) %>% filter(year == "2017") %>%
     filter(where_is_the_graffiti_located_ %in% c("Front", "Rear", "Side")) %>%
     dplyr::select(Y = latitude, X = longitude) %>%
@@ -156,7 +156,7 @@ graffiti <-
     mutate(Legend = "Graffiti")
 
 streetLightsOut <- 
-  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Street-Lights-All-Out-No-Dupl/756k-itxx") %>%
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Street-Lights-All-Out/zuxi-7xem") %>%
     mutate(year = substr(creation_date,1,4)) %>% filter(year == "2017") %>%
     dplyr::select(Y = latitude, X = longitude) %>%
     na.omit() %>%
@@ -165,7 +165,7 @@ streetLightsOut <-
     mutate(Legend = "Street_Lights_Out")
 
 sanitation <-
-  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Sanitation-Code-Complaints-No/rccf-5427") %>%
+  read.socrata("https://data.cityofchicago.org/Service-Requests/311-Service-Requests-Sanitation-Code-Complaints-Hi/me59-5fac") %>%
     mutate(year = substr(creation_date,1,4)) %>% filter(year == "2017") %>%
     dplyr::select(Y = latitude, X = longitude) %>%
     na.omit() %>%
@@ -209,16 +209,523 @@ policestation <-
 ```{r}
 trafficCrash <- 
   read.socrata("https://data.cityofchicago.org/Transportation/Traffic-Crashes-Crashes/85ca-t3if") %>%
-    mutate(year = substr(CRASH_DATE,1,4)) %>% filter(year == "2017") %>%
+    mutate(year = substr(crash_date,1,4)) %>% filter(year == "2017") %>%
     dplyr::select(Y = latitude, X = longitude) %>%
     na.omit() %>%
     st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant") %>%
     st_transform(st_crs(fishnet)) %>%
-    mutate(Legend = "Street_Lights_Out")
+    mutate(Legend = "trafficCrash")
+```
+
+```{r}
+vars_net <- 
+  rbind(abandonCars, abandonBuildings, graffiti, streetLightsOut, sanitation, liquorRetail, trafficCrash, policestation, garbagecarts) %>%
+  st_join(., fishnet, join=st_within) %>%
+  st_drop_geometry() %>%
+  group_by(uniqueID, Legend) %>%
+  summarize(count = n()) %>%
+    full_join(fishnet) %>%
+    spread(Legend, count, fill=0) %>%
+    st_sf() %>%
+    dplyr::select(-`<NA>`) %>%
+    na.omit() %>%
+    ungroup()
+
+```
+
+```{r fig.width=6, fig.height=4}
+vars_net.long <- 
+  gather(vars_net, Variable, value, -geometry, -uniqueID)
+
+vars <- unique(vars_net.long$Variable)
+mapList <- list()
+
+for(i in vars){
+  mapList[[i]] <- 
+    ggplot() +
+      geom_sf(data = filter(vars_net.long, Variable == i), aes(fill=value), colour=NA) +
+      scale_fill_viridis(name="") +
+      labs(title=i) +
+      mapTheme()}
+
+do.call(grid.arrange,c(mapList, ncol=3, top="Risk Factors by Fishnet"))
+```
+nearest neighbour 
+
+```{r}
+st_c <- st_coordinates
+st_coid <- st_centroid
+
+trafficCrash.nn =
+        nn_function(na.omit(st_c(st_coid(vars_net))), na.omit(st_c(trafficCrash)),3)
+
+vars_net <-
+  vars_net %>%
+    mutate(
+      Abandoned_Buildings.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(abandonBuildings),3),
+      Abandoned_Cars.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(abandonCars),3),
+      Graffiti.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(graffiti),3),
+      Liquor_Retail.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(liquorRetail),3),
+      Street_Lights_Out.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(streetLightsOut),3),
+      Sanitation.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(sanitation),3),
+      garbagecarts.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(garbagecarts),3),
+      policestation.nn =
+        nn_function(st_c(st_coid(vars_net)), st_c(policestation),3),
+      trafficCrash.nn =
+       trafficCrash.nn)
+```
+
+```{r}
+final_net <-
+  left_join(crime_net, st_drop_geometry(vars_net), by="uniqueID") 
+
+final_net <-
+  st_centroid(final_net) %>%
+    st_join(dplyr::select(neighborhoods, name)) %>%
+    st_join(dplyr::select(policeDistricts, District)) %>%
+      st_drop_geometry() %>%
+      left_join(dplyr::select(final_net, geometry, uniqueID)) %>%
+      st_sf() %>%
+  na.omit()
+```
+
+```{r fig.width=6, fig.height=4}
+vars_net.long.nn <- 
+  dplyr::select(vars_net, ends_with(".nn")) %>%
+    gather(Variable, value, -geometry)
+
+vars <- unique(vars_net.long.nn$Variable)
+mapList <- list()
+
+for(i in vars){
+  mapList[[i]] <- 
+    ggplot() +
+      geom_sf(data = filter(vars_net.long.nn, Variable == i), aes(fill=value), colour=NA) +
+      scale_fill_viridis(name="") +
+      labs(title=i) +
+      mapTheme()}
+
+do.call(grid.arrange,c(mapList, ncol = 3, top = "Nearest Neighbor risk Factors by Fishnet"))
+```
+
+
+```{r}
+## {spdep} to make polygon to neighborhoods... 
+final_net.nb <- poly2nb(as_Spatial(final_net), queen=TRUE)
+## ... and neighborhoods to list of weigths
+final_net.weights <- nb2listw(final_net.nb, style="W", zero.policy=TRUE)
+
+
+# local Morans'I
+local_morans <- localmoran(final_net$count, final_net.weights, zero.policy=TRUE) %>% 
+  as.data.frame()
+
+# join local Moran's I results to fishnet
+final_net.localMorans <- 
+  cbind(local_morans, as.data.frame(final_net)) %>% 
+  st_sf() %>%
+  dplyr::select(Abandoned_Cars_Count = Abandoned_Cars, 
+                Local_Morans_I = Ii, 
+                P_Value = `Pr(z != E(Ii))`) %>%
+  mutate(Significant_Hotspots = ifelse(P_Value <= 0.001, 1, 0)) %>%
+  gather(Variable, Value, -geometry)
+
+vars.moran = unique(final_net.localMorans$Variable)
+plots2 = list()
+for(i in vars.moran){
+  plots2[[i]] = ggplot() +
+      geom_sf(data = filter(final_net.localMorans, Variable == i), 
+              aes(fill = Value), colour=NA) +
+      scale_fill_viridis(name="",option="C") +
+      labs(title=i) +
+      mapTheme(title_size = 14) + theme(legend.position="bottom")}
+grid.arrange(grobs=plots2, ncol = 4, 
+             top=textGrob("Local Morans I statistics", gp=gpar(fontsize=18)))
+```
+
+```{r fig.width=6, fig.height=12}
+## important to drop the geometry from joining features
+
+correlation.long <-
+  st_drop_geometry(final_net) %>%
+    dplyr::select(-uniqueID, -cvID,  -name, -District) %>%
+    gather(Variable, Value, -count)
+
+correlation.cor <-
+  correlation.long %>%
+    group_by(Variable) %>%
+    summarize(correlation = cor(Value, count, use = "complete.obs"))
+    
+ggplot(correlation.long, aes(Value, count)) +
+  geom_point(size = 0.1) +
+  geom_text(data = correlation.cor, aes(label = paste("r =", round(correlation, 2))),
+            x=-Inf, y=Inf, vjust = 1.5, hjust = -.1) +
+  geom_smooth(method = "lm", se = FALSE, colour = "black") +
+  facet_wrap(~Variable, ncol = 2, scales = "free") +
+  labs(title = "Burglary count as a function of risk factors") +
+  plotTheme()
+```
+
+```{r}
+ggplot(final_net) +
+  geom_histogram(aes(count),bins=40, color="black") +
+  labs(title = "Histogram of theft count",
+       subtitle = "San Francisco, 2018") +
+  plotTheme()
+
+```
+
+```{r}
+final_net <-
+  final_net %>% 
+  mutate(theft.isSig = 
+           ifelse(localmoran(final_net$count, 
+                             final_net.weights, zero.policy = TRUE)[,5] <= 0.0000001, 1, 0)) %>%
+  mutate(theft.isSig.dist = 
+           nn_function(st_coordinates(st_centroid(final_net)),
+                       st_coordinates(st_centroid(
+                         filter(final_net, theft.isSig == 1))), 1))
+```
+
+
+```{r}
+reg.vars <- c("Abandoned_Buildings.nn", "Abandoned_Cars.nn", "Graffiti.nn", 
+              "Liquor_Retail.nn", "Street_Lights_Out.nn", "Sanitation.nn", 
+              "trafficCrash.nn","policestation.nn","garbagecarts.nn")
+
+reg.ss.vars <- c("Abandoned_Buildings.nn", "Abandoned_Cars.nn", "Graffiti.nn", 
+              "Liquor_Retail.nn", "Street_Lights_Out.nn", "Sanitation.nn", 
+              "trafficCrash.nn","policestation.nn","garbagecarts.nn",
+              "theft.isSig", "theft.isSig.dist")
+```
+
+```{r}
+crossValidate0 <- function(dataset, id, dependentVariable, indVariables) {
+  
+  allPredictions <- data.frame()
+  cvID_list <- unique(dataset[[id]])
+  
+  for (i in cvID_list) {
+    
+    thisFold <- i
+    cat("This hold out fold is", thisFold, "\n")
+    
+    fold.train <- filter(dataset, dataset[[id]] != thisFold) %>% as.data.frame() %>% 
+      dplyr::select(id, geometry, indVariables, dependentVariable)
+    fold.test  <- filter(dataset, dataset[[id]] == thisFold) %>% as.data.frame() %>% 
+      dplyr::select(id, geometry, indVariables, dependentVariable)
+    
+    regression <-
+      glm(count ~ ., family = "poisson", 
+          data = fold.train %>% 
+            dplyr::select(-geometry, -id))
+    
+    thisPrediction <- 
+      mutate(fold.test, Prediction = predict(regression, fold.test, type = "response"))
+    
+    allPredictions <-
+      rbind(allPredictions, thisPrediction)
+    
+  }
+  return(st_sf(allPredictions))
+}
+```
+
+```{r}
+is.na(final_net)
+
+which(is.na(final_net))
+
+length(final_net$Abandoned_Buildings.nn)
+
+summary(final_net)
 ```
 
 ```{r}
 
 
+
+reg.cv = crossValidate0(
+    dataset = final_net,
+    id = "cvID",                           
+    dependentVariable = "count",
+    indVariables = reg.vars) %>%
+  dplyr::select(cvID , count, Prediction, geometry)
 ```
 
+
+```{r}
+## RUN REGRESSIONS
+reg.cv <- crossValidate0(
+  dataset = final_net,
+  id = "cvID",
+  dependentVariable = "count",
+  indVariables = reg.vars) %>%
+    dplyr::select(cvID = cvID, count, Prediction, geometry)
+
+reg.ss.cv <- crossValidate0(
+  dataset = final_net,
+  id = "cvID",
+  dependentVariable = "count",
+  indVariables = reg.ss.vars) %>%
+    dplyr::select(cvID = cvID, count, Prediction, geometry)
+  
+reg.spatialCV <- crossValidate0(
+  dataset = final_net,
+  id = "name",
+  dependentVariable = "count",
+  indVariables = reg.vars) %>%
+    dplyr::select(cvID = name, count, Prediction, geometry)
+
+reg.ss.spatialCV <- crossValidate0(
+  dataset = final_net,
+  id = "name",
+  dependentVariable = "count",
+  indVariables = reg.ss.vars) %>%
+    dplyr::select(cvID = name, count, Prediction, geometry)
+```
+
+
+
+
+```{r}
+reg.summary <- 
+  rbind(
+    mutate(reg.cv,           Error = Prediction - count,
+                             Regression = "Random k-fold CV: Just Risk Factors"),
+                             
+    mutate(reg.ss.cv,        Error = Prediction - count,
+                             Regression = "Random k-fold CV: Spatial Process"),
+    
+    mutate(reg.spatialCV,    Error = Prediction - count,
+                             Regression = "Spatial LOGO-CV: Just Risk Factors"),
+                             
+    mutate(reg.ss.spatialCV, Error = Prediction - count,
+                             Regression = "Spatial LOGO-CV: Spatial Process")) %>%
+    st_sf() 
+```
+
+A small multiple map of model errors by random k-fold and spatial cross validation.
+```{r}
+error_by_reg_and_fold <- 
+  reg.summary %>%
+    group_by(Regression, cvID) %>% 
+    summarize(Mean_Error = mean(Prediction - count, na.rm = T),
+              MAE = mean(abs(Mean_Error), na.rm = T),
+              SD_MAE = mean(abs(Mean_Error), na.rm = T)) %>%
+  ungroup()
+
+error_by_reg_and_fold %>%
+  ggplot(aes(MAE)) + 
+    geom_histogram(bins = 30, colour="black", fill = "#FDE725FF") +
+    facet_wrap(~Regression) +  
+    geom_vline(xintercept = 0) + scale_x_continuous(breaks = seq(0, 8, by = 1)) + 
+    labs(title="Distribution of MAE", subtitle = "k-fold cross validation vs. LOGO-CV",
+         x="Mean Absolute Error", y="Count") +
+    plotTheme()
+```
+
+
+```{r}
+st_drop_geometry(error_by_reg_and_fold) %>%
+  group_by(Regression) %>% 
+    summarize(Mean_MAE = round(mean(MAE), 2),
+              SD_MAE = round(sd(MAE), 2)) %>%
+  kable() %>%
+    kable_styling("striped", full_width = F) %>%
+    row_spec(2, color = "black", background = "#FDE725FF") %>%
+    row_spec(4, color = "black", background = "#FDE725FF") 
+```
+
+```{r}
+theftppp <- as.ppp(st_coordinates(autotheft), W = st_bbox(final_net))
+theftKD.1000 <- spatstat.core::density.ppp(theftppp, 1000)
+theftKD.1500 <- spatstat.core::density.ppp(theftppp, 1500)
+theftKD.2000 <- spatstat.core::density.ppp(theftppp, 2000)
+theftKD.df <- rbind(
+  mutate(data.frame(rasterToPoints(mask(raster(theftKD.1000), as(neighborhoods, 'Spatial')))), Legend = "1000 Ft."),
+  mutate(data.frame(rasterToPoints(mask(raster(theftKD.1500), as(neighborhoods, 'Spatial')))), Legend = "1500 Ft."),
+  mutate(data.frame(rasterToPoints(mask(raster(theftKD.2000), as(neighborhoods, 'Spatial')))), Legend = "2000 Ft.")) 
+
+theftKD.df$Legend <- factor(theftKD.df$Legend, levels = c("1000 Ft.", "1500 Ft.", "2000 Ft."))
+
+ggplot(data=theftKD.df, aes(x=x, y=y)) +
+  geom_raster(aes(fill=layer)) + 
+  facet_wrap(~Legend) +
+  coord_sf(crs=st_crs(final_net)) + 
+  scale_fill_viridis(name="Density") +
+  labs(title = "Kernel density with 3 different search radii") +
+  mapTheme(title_size = 14)
+```
+
+A table of raw errors by race context for a random k-fold vs. spatial cross validation regression.
+
+```{r}
+census_api_key("e79f3706b6d61249968c6ce88794f6f556e5bf3d", overwrite = TRUE)
+
+tracts18 <- 
+  get_acs(geography = "tract", variables = c("B01001_001E","B01001A_001E"), 
+          year = 2018, state=17, county=031, geometry=T) %>%
+  st_transform('ESRI:102271')  %>% 
+  dplyr::select(variable, estimate, GEOID) %>%
+  spread(variable, estimate) %>%
+  rename(TotalPop = B01001_001,
+         NumberWhites = B01001A_001) %>%
+  mutate(percentWhite = NumberWhites / TotalPop,
+         raceContext = ifelse(percentWhite > .5, "Majority_White", "Majority_Non_White")) %>%
+  .[neighborhoods,]
+```
+
+```{r}
+reg.summary <- 
+  rbind(
+    mutate(reg.cv,           Error = Prediction - count,
+                             Regression = "Random k-fold CV: Just Risk Factors"),
+                             
+    mutate(reg.ss.cv,        Error = Prediction - count,
+                             Regression = "Random k-fold CV: Spatial Process"),
+    
+    mutate(reg.spatialCV,    Error = Prediction - count,
+                             Regression = "Spatial LOGO-CV: Just Risk Factors"),
+                             
+    mutate(reg.ss.spatialCV, Error = Prediction - count,
+                             Regression = "Spatial LOGO-CV: Spatial Process")) %>%
+    st_sf() 
+```
+
+```{r}
+reg.summary %>% 
+  filter(str_detect(Regression, "LOGO")) %>%
+    st_centroid() %>%
+    st_join(tracts18) %>%
+    na.omit() %>%
+      st_drop_geometry() %>%
+      group_by(Regression, raceContext) %>%
+      summarize(mean.Error = mean(Error, na.rm = T)) %>%
+      spread(raceContext, mean.Error) %>%
+      kable(caption = "Mean Error by neighborhood racial context") %>%
+        kable_styling("striped", full_width = F)  
+```
+
+```{r}
+theft_ppp <- as.ppp(st_coordinates(autotheft), W = st_bbox(final_net))
+theft_KD <- spatstat.core::density.ppp(theft_ppp, 1000)
+
+as.data.frame(theft_KD) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(final_net)) %>%
+  aggregate(., final_net, mean) %>%
+   ggplot() +
+     geom_sf(aes(fill=value)) +
+     geom_sf(data = sample_n(autotheft, 1500), size = .5,colour = "red" , alpha = .2) +
+     scale_fill_viridis(name = "Density") +
+     labs(title = "Kernel density of 2017 burglaries") +
+     mapTheme()
+```
+
+```{r}
+autotheft18 <- 
+  read.socrata("https://data.cityofchicago.org/Public-Safety/Crimes-2018/3i3m-jwuy") %>% 
+  filter(Primary.Type == "MOTOR VEHICLE THEFT" & Description == "AUTOMOBILE") %>%
+  mutate(x = gsub("[()]", "", Location)) %>%  # [ab] means a or b 
+  separate(x,into= c("Y","X"), sep=",") %>%
+  mutate(X = as.numeric(X),Y = as.numeric(Y)) %>% 
+  na.omit() %>%
+  st_as_sf(coords = c("X", "Y"), crs = 4326, agr = "constant")%>%
+  st_transform('ESRI:102271') %>% 
+  distinct() %>%
+  .[fishnet,]
+
+```
+
+```{r}
+theft_KDE_sf <- as.data.frame(theft_KD) %>%
+  st_as_sf(coords = c("x", "y"), crs = st_crs(final_net)) %>%
+  aggregate(., final_net, mean) %>%
+  mutate(label = "Kernel Density",
+         Risk_Category = ntile(value, 100),
+         Risk_Category = case_when(
+           Risk_Category >= 90 ~ "90% to 100%",
+           Risk_Category >= 70 & Risk_Category <= 89 ~ "70% to 89%",
+           Risk_Category >= 50 & Risk_Category <= 69 ~ "50% to 69%",
+           Risk_Category >= 30 & Risk_Category <= 49 ~ "30% to 49%",
+           Risk_Category >= 1 & Risk_Category <= 29 ~ "1% to 29%")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(autotheft18) %>% mutate(theftCount = 1), ., sum) %>%
+    mutate(theftCount = replace_na(theftCount, 0))) %>%
+  dplyr::select(label, Risk_Category, theftCount)
+
+theft_risk_sf <-
+  filter(reg.summary, Regression == "Spatial LOGO-CV: Spatial Process") %>%
+  mutate(label = "Risk Predictions",
+         Risk_Category = ntile(Prediction, 100),
+         Risk_Category = case_when(
+           Risk_Category >= 90 ~ "90% to 100%",
+           Risk_Category >= 70 & Risk_Category <= 89 ~ "70% to 89%",
+           Risk_Category >= 50 & Risk_Category <= 69 ~ "50% to 69%",
+           Risk_Category >= 30 & Risk_Category <= 49 ~ "30% to 49%",
+           Risk_Category >= 1 & Risk_Category <= 29 ~ "1% to 29%")) %>%
+  cbind(
+    aggregate(
+      dplyr::select(autotheft18) %>% mutate(theftCount = 1), ., sum) %>%
+      mutate(theftCount = replace_na(theftCount, 0))) %>%
+  dplyr::select(label,Risk_Category, theftCount)
+
+```
+
+```{r}
+
+
+rbind(theft_KDE_sf, theft_risk_sf) %>%
+  na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category, -geometry) %>%
+  ggplot() +
+    geom_sf(aes(fill = Risk_Category), colour = NA) +
+    geom_sf(data = sample_n(autotheft18, 3000), size = .3, colour = "black") +
+    facet_wrap(~label, ) +
+    scale_fill_viridis(discrete = TRUE) +
+    labs(title="Comparison of Kernel Density and Risk Predictions",
+         subtitle="2017 burglar risk predictions; 2018 burglaries") +
+    mapTheme()
+```
+
+
+```{r}
+rbind(theft_KDE_sf, theft_risk_sf) %>%
+  na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category, -geometry) %>%
+  ggplot() +
+    geom_sf(aes(fill = Risk_Category), colour = NA) +
+    geom_sf(data = sample_n(burglaries18, 3000), size = .5, colour = "black") +
+    facet_wrap(~label, ) +
+    scale_fill_viridis(discrete = TRUE) +
+    labs(title="Comparison of Kernel Density and Risk Predictions",
+         subtitle="2017 burglar risk predictions; 2018 burglaries") +
+    mapTheme()
+```
+
+
+```{r}
+rbind(theft_KDE_sf, theft_risk_sf) %>%
+  st_set_geometry(NULL) %>% na.omit() %>%
+  gather(Variable, Value, -label, -Risk_Category) %>%
+  group_by(label, Risk_Category) %>%
+  summarize(count = sum(Value)) %>%
+  ungroup() %>%
+  group_by(label) %>%
+  mutate(Rate_of_test_set_crimes = count / sum(count)) %>%
+    ggplot(aes(Risk_Category,Rate_of_test_set_crimes)) +
+      geom_bar(aes(fill=label), position="dodge", stat="identity") +
+      scale_fill_viridis(discrete = TRUE) +
+      labs(title = "Risk prediction vs. Kernel density, 2018 burglaries") +
+      plotTheme() + theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
+```
+
+                
